@@ -10,22 +10,23 @@ Public Domain 单头文件）。`nob.c` 变化后 `./nob` 会自动重建自身�
 
 ```bash
 cc nob.c -o nob     # 首次引导
-./nob               # 默认：构建 bili（动态）+ bili-static（musl 静态单文件）
-./nob static        # 只构建静态版
+./nob               # 默认：构建 bili（动态）；已有 musl 工具链时一并构建 bili-static
+./nob static        # 只构建静态版（必须先引导 musl 工具链）
 ./nob clean         # 清理产物
 ```
 
 需要：C11 编译器（gcc/clang）。运行需要系统装有 `curl` 和 `ffmpeg`。
 
 静态构建使用内嵌工具链 `.musl/install/bin/musl-gcc`（musl 1.2.5，源码自动编译，
-无需 root）。如需从零引导：
+无需 root）。全新环境没有该工具链时，`./nob` 会跳过 `bili-static` 并给出提示
+（动态版不受影响），`./nob static` 则会直接报错。如需从零引导：
 
 ```bash
 mkdir -p .musl && cd .musl
 curl -O https://musl.libc.org/releases/musl-1.2.5.tar.gz && tar xzf musl-1.2.5.tar.gz
 mkdir build && cd build && ../musl-1.2.5/configure --prefix=$PWD/../install && make -j8 && make install
 cd ../.. && ./nob static
-``
+```
 番剧接口与普通视频共用一套 DASH 下载与混流逻辑（`pgc/player/web/playurl`，
 无需 WBI 签名）；`-e` 支持选集（`3` / `1,3,5-8` / `all`）。
 
