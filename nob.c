@@ -89,27 +89,26 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (strcmp(what, "static") == 0 || strcmp(what, "all") == 0) {
+    if (strcmp(what, "static") == 0) {
         if (!nob_file_exists(MUSL_CC)) {
             nob_log(NOB_ERROR,
                     "静态构建需要 musl 工具链，未找到 %s。引导方法见 README 构建"
                     "一节，或运行: make static 前先完成 musl 自举", MUSL_CC);
             return 1;
         }
+        return build_one(MUSL_CC, "bili-static", true) ? 0 : 1;
     }
 
     if (strcmp(what, "all") == 0) {
-        if (!build_one("cc", "bili", false)) {
-            return 1;
+        bool ok = build_one("cc", "bili", false);
+        if (!nob_file_exists(MUSL_CC)) {
+            nob_log(NOB_WARNING,
+                    "跳过 bili-static：未找到 musl 工具链 %s（引导方法见 README 构建一节）",
+                    MUSL_CC);
+        } else {
+            ok = build_one(MUSL_CC, "bili-static", true) && ok;
         }
-        if (!build_one(MUSL_CC, "bili-static", true)) {
-            return 1;
-        }
-        return 0;
-    }
-
-    if (strcmp(what, "static") == 0) {
-        return build_one(MUSL_CC, "bili-static", true) ? 0 : 1;
+        return ok ? 0 : 1;
     }
 
     nob_log(NOB_ERROR, "未知命令 '%s'（可用: all[默认] / static / clean）", what);
