@@ -20,6 +20,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#define BILI_VERSION "0.0.1"
+
 typedef struct {
     const char *input;
     int page;        /* 0=第1P, -1=全部分P, >0=指定P */
@@ -59,6 +61,7 @@ static void usage(FILE *out)
         "      --mp4            混流为 mp4（默认 mkv）\n"
         "  -v, --verbose        输出请求 URL 等调试信息\n"
         "      --selftest       运行内置自检（MD5/av-bv 转换）\n"
+        "  -V, --version        显示版本号\n"
         "  -h, --help           显示帮助\n\n"
         "示例:\n"
         "  bili login\n"
@@ -97,7 +100,10 @@ static int parse_args(int argc, char **argv, opts_t *o)
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
 #define NEXT_VAL() (i + 1 < argc ? argv[++i] : NULL)
-        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
+        if (strcmp(a, "-V") == 0 || strcmp(a, "--version") == 0) {
+            printf("bili %s\n", BILI_VERSION);
+            return 200; /* 已打印版本，正常结束 */
+        } else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             usage(stdout);
             return 200; /* 已打印帮助，正常结束 */
         } else if (strcmp(a, "-p") == 0 || strcmp(a, "--page") == 0) {
