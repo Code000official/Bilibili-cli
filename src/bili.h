@@ -53,10 +53,16 @@ typedef struct {
  */
 int bili_get_buvid(char **b3, char **b4, int verbose);
 
+/* 同上但仅读本地缓存、绝不联网（启动期使用）。命中返回 0 */
+int bili_get_buvid_cached(char **b3, char **b4);
+
 /*
  * 获取 WBI 签名密钥（本地缓存 6 小时，未登录时 nav 也返回密钥）。
  */
 int bili_get_wbi_keys(const char *cookie, char **img, char **sub, int verbose);
+
+/* 同上但仅读未过期的本地缓存、绝不联网（启动期使用）。命中返回 0 */
+int bili_get_wbi_keys_cached(char **img, char **sub);
 
 /* 获取视频信息。返回 0 成功 */
 int bili_view(const char *bvid, const char *cookie,

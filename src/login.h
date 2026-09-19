@@ -23,6 +23,15 @@ int login_whoami(const char *cookie);
  */
 int login_status(const char *cookie, char **uname);
 
+/*
+ * 本地判断登录状态（0 网络）：cookie 含 SESSDATA 即视为已登录，
+ * 用户名读上次联网验证的缓存（uname.txt）。供 TUI 启动期使用。
+ */
+int login_status_local(const char *cookie, char **uname);
+
+/* 缓存登录用户名到 state 目录（联网验证成功时调用） */
+void login_save_uname(const char *uname);
+
 /* 读取已保存的登录 cookie，追加到 kv 列表（无则不动） */
 void login_load_cookies(kv_t **arr, size_t *n);
 

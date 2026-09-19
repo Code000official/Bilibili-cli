@@ -22,6 +22,8 @@
 #include <time.h>
 #include <unistd.h>
 
+static void show_loading(const char *text);
+
 /* ---------- 调色板（256 色） ---------- */
 
 #define C_DEFAULT   (-1)
@@ -129,6 +131,7 @@ static void clip_text(char *out, size_t outn, const char *s, int maxw)
 
 /* ---------- Cookie / 状态 ---------- */
 
+/* 联网完整刷新：WBI 密钥 + 登录状态验证（Ctrl-R / 登录后使用） */
 static void refresh_session(void)
 {
     free(U.cookie);
@@ -151,10 +154,49 @@ static void refresh_session(void)
     }
 }
 
+/* 本地会话加载（0 网络）：启动期使用，离线也能立即出界面。
+ * 登录态以 SESSDATA 本地判断，用户名读缓存；WBI 未命中时留空，
+ * 由 load_target 在解析前联网补取。 */
+static void load_session_local(void)
+{
+    free(U.cookie);
+    char *b3 = NULL, *b4 = NULL;
+    bili_get_buvid_cached(&b3, &b4);
+    U.cookie = login_build_cookie(b3, b4, NULL);
+    free(b3);
+    free(b4);
+    U.q.cookie = U.cookie;
+
+    free(U.img);
+    free(U.sub);
+    U.img = U.sub = NULL;
+    bili_get_wbi_keys_cached(&U.img, &U.sub);
+    U.q.img_key = U.img;
+    U.q.sub_key = U.sub;
+
+    U.uname[0] = '\0';
+    char *un = NULL;
+    U.logged = login_status_local(U.cookie, &un) == 1;
+    if (un) {
+        snprintf(U.uname, sizeof(U.uname), "%s", un);
+        free(un);
+    }
+}
+
 /* ---------- 首页加载目标 ---------- */
 
 static void load_target(const char *text)
 {
+    /* 启动期 WBI 缓存未命中（或已过期）时，在解析前联网补取 */
+    if (!U.img || !U.sub) {
+        show_loading("获取 WBI 密钥...");
+        if (bili_get_wbi_keys(U.cookie, &U.img, &U.sub, 0) != 0) {
+            set_toast("获取 WBI 密钥失败，请检查网络");
+            return;
+        }
+        U.q.img_key = U.img;
+        U.q.sub_key = U.sub;
+    }
     char *input = xstrdup(text);
     if (strstr(input, "b23.tv")) {
         char *final_url = NULL;
@@ -336,7 +378,8 @@ static void draw_header(void)
 {
     char line[512];
     if (U.logged) {
-        snprintf(line, sizeof(line), " bili │ 已登录: %s │ Ctrl-R 刷新 │ Ctrl-C 退出", U.uname);
+        snprintf(line, sizeof(line), " bili │ 已登录: %s │ Ctrl-R 刷新 │ Ctrl-C 退出",
+                 U.uname[0] ? U.uname : "（未验证）");
     } else {
         snprintf(line, sizeof(line), " bili │ 未登录（仅 480P）│ Ctrl-L 登录 │ Ctrl-R 刷新");
     }
@@ -686,6 +729,7 @@ static void input_backspace(void)
 
 static void do_refresh(void)
 {
+    show_loading("刷新登录状态...");
     refresh_session();
     set_toast("已刷新：%s", U.logged ? "已登录" : "未登录");
 }
@@ -693,6 +737,8 @@ static void do_refresh(void)
 static void do_login(void)
 {
     term_suspend();
+    printf("正在获取登录二维码...\n");
+    fflush(stdout);
     login_qr_flow(0);
     refresh_session();
     term_resume();
@@ -868,8 +914,8 @@ int tui_main(void)
 
     term_init();
 
-    show_loading("初始化...");
-    refresh_session();
+    /* 本地会话加载（0 网络，瞬时完成），无需加载遮罩 */
+    load_session_local();
     bq_init(&U.q, U.cookie, U.img, U.sub, 0);
 
     term_key_t k;

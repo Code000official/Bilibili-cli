@@ -168,26 +168,30 @@ static void parse_stream(cJSON *item, bili_stream_t *s)
 
 /* ---------- buvid ---------- */
 
-int bili_get_buvid(char **b3, char **b4, int verbose)
+/* 仅读本地缓存（0 网络）。命中返回 0，适合启动期使用 */
+int bili_get_buvid_cached(char **b3, char **b4)
 {
     *b3 = *b4 = NULL;
-
     char **f = NULL;
     int n = cache_read("buvid.txt", &f);
     if (n >= 2 && f[0][0] && f[1][0]) {
         *b3 = xstrdup(f[0]);
         *b4 = xstrdup(f[1]);
-        for (int i = 0; i < n; i++) {
-            free(f[i]);
-        }
-        free(f);
-        return 0;
     }
     if (n > 0) {
         for (int i = 0; i < n; i++) {
             free(f[i]);
         }
         free(f);
+    }
+    return (*b3 && *b4) ? 0 : -1;
+}
+
+int bili_get_buvid(char **b3, char **b4, int verbose)
+{
+    *b3 = *b4 = NULL;
+    if (bili_get_buvid_cached(b3, b4) == 0) {
+        return 0;
     }
 
     if (verbose) {
@@ -239,10 +243,10 @@ static char *wbi_key_from_url(const char *url)
     return xstrndup(slash + 1, (size_t)(dot - slash - 1));
 }
 
-int bili_get_wbi_keys(const char *cookie, char **img, char **sub, int verbose)
+/* 仅读未过期的本地缓存（0 网络）。命中返回 0，适合启动期使用 */
+int bili_get_wbi_keys_cached(char **img, char **sub)
 {
     *img = *sub = NULL;
-
     char **f = NULL;
     int n = cache_read("wbi.txt", &f);
     if (n >= 3 && f[0][0] && f[1][0]) {
@@ -250,11 +254,6 @@ int bili_get_wbi_keys(const char *cookie, char **img, char **sub, int verbose)
         if (time(NULL) - (time_t)ts < WBI_CACHE_SECONDS) {
             *img = xstrdup(f[0]);
             *sub = xstrdup(f[1]);
-            for (int i = 0; i < n; i++) {
-                free(f[i]);
-            }
-            free(f);
-            return 0;
         }
     }
     if (n > 0) {
@@ -262,6 +261,15 @@ int bili_get_wbi_keys(const char *cookie, char **img, char **sub, int verbose)
             free(f[i]);
         }
         free(f);
+    }
+    return (*img && *sub) ? 0 : -1;
+}
+
+int bili_get_wbi_keys(const char *cookie, char **img, char **sub, int verbose)
+{
+    *img = *sub = NULL;
+    if (bili_get_wbi_keys_cached(img, sub) == 0) {
+        return 0;
     }
 
     if (verbose) {

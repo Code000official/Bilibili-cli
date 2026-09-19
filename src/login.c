@@ -443,6 +443,10 @@ int login_status(const char *cookie, char **uname)
     if (uname) {
         *uname = NULL;
     }
+    /* 无 SESSDATA 必为未登录，免去一次 nav 请求（离线时避免长时间阻塞） */
+    if (!cookie || !*cookie || !strstr(cookie, "SESSDATA")) {
+        return 0;
+    }
     char *body = NULL;
     if (http_get_str(API_NAV, cookie, &body) != 0) {
         return -1;
@@ -459,7 +463,63 @@ int login_status(const char *cookie, char **uname)
         *uname = jstr(data, "uname");
     }
     cJSON_Delete(root);
+    /* 用户名落盘，供启动期的本地判断（login_status_local）显示 */
+    if (logged && uname && *uname) {
+        login_save_uname(*uname);
+    }
     return logged;
+}
+
+/* 本地判断登录状态（0 网络）：有 SESSDATA 视为已登录，
+ * 用户名读上次联网验证的缓存。供 TUI 启动期使用。 */
+int login_status_local(const char *cookie, char **uname)
+{
+    if (uname) {
+        *uname = NULL;
+    }
+    if (!cookie || !strstr(cookie, "SESSDATA")) {
+        return 0;
+    }
+    if (uname) {
+        char *dir = state_dir();
+        char *path = xmalloc(strlen(dir) + 16);
+        sprintf(path, "%s/uname.txt", dir);
+        free(dir);
+        FILE *fp = fopen(path, "r");
+        free(path);
+        if (fp) {
+            char line[128];
+            if (fgets(line, sizeof(line), fp)) {
+                size_t l = strlen(line);
+                while (l && (line[l - 1] == '\n' || line[l - 1] == '\r')) {
+                    line[--l] = '\0';
+                }
+                if (line[0]) {
+                    *uname = xstrdup(line);
+                }
+            }
+            fclose(fp);
+        }
+    }
+    return 1;
+}
+
+void login_save_uname(const char *uname)
+{
+    if (!uname || !*uname) {
+        return;
+    }
+    char *dir = state_dir();
+    mkdir_p(dir);
+    char *path = xmalloc(strlen(dir) + 16);
+    sprintf(path, "%s/uname.txt", dir);
+    free(dir);
+    FILE *fp = fopen(path, "w");
+    if (fp) {
+        fprintf(fp, "%s\n", uname);
+        fclose(fp);
+    }
+    free(path);
 }
 
 int login_whoami(const char *cookie)
@@ -493,6 +553,9 @@ int login_whoami(const char *cookie)
            uname ? uname : "?", level,
            vip ? " " : "", vip ? (vip_label && *vip_label ? vip_label : "大会员") : "",
            coin);
+    if (uname && *uname) {
+        login_save_uname(uname);
+    }
     free(uname);
     free(vip_label);
     cJSON_Delete(root);

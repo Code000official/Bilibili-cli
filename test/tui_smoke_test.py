@@ -63,7 +63,7 @@ try:
     raw = out.decode("latin1")
     print("== 首页 ==")
     ok1 = "\x1b[?1049h" in raw
-    ok2 = "bili" in txt and "未登录" in txt
+    ok2 = "bili" in txt and ("未登录" in txt or "已登录" in txt)
     ok3 = "链接/BV" in txt
     print("  备用屏:", ok1, "| 标题+登录态:", ok2, "| 输入框提示:", ok3)
     if not (ok1 and ok2 and ok3):

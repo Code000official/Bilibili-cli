@@ -17,7 +17,10 @@ const char *HTTP_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
-/* 组装 API 请求公共参数，返回参数个数 */
+/* 组装 API 请求公共参数，返回参数个数。
+ * API 均为小 JSON，正常 <1s 完成；快速失败优先：
+ * 单次 10s 连接 / 20s 总超时，重试 3 次，最坏 ~1 分钟出结果，
+ * 避免网络不通时长时间挂起。 */
 static int curl_args(char **argv, const char *cookie, const char *max_time)
 {
     int n = 0;
@@ -26,14 +29,14 @@ static int curl_args(char **argv, const char *cookie, const char *max_time)
     argv[n++] = (char *)"--fail";
     argv[n++] = (char *)"--location";
     argv[n++] = (char *)"--connect-timeout";
-    argv[n++] = (char *)"15";
+    argv[n++] = (char *)"10";
     argv[n++] = (char *)"--max-time";
     argv[n++] = (char *)max_time;
     argv[n++] = (char *)"--retry";
-    argv[n++] = (char *)"8";
+    argv[n++] = (char *)"3";
     argv[n++] = (char *)"--retry-all-errors";
     argv[n++] = (char *)"--retry-delay";
-    argv[n++] = (char *)"2";
+    argv[n++] = (char *)"1";
     argv[n++] = (char *)"-A";
     argv[n++] = (char *)HTTP_UA;
     if (cookie && *cookie) {
@@ -66,7 +69,7 @@ int http_get_str_jar(const char *url, const char *cookie, const char *jarfile,
 {
     *out = NULL;
     char *argv[52];
-    int n = curl_args(argv, cookie, "60");
+    int n = curl_args(argv, cookie, "20");
     if (jarfile && *jarfile) {
         argv[n++] = (char *)"-c";
         argv[n++] = (char *)jarfile;
@@ -185,9 +188,14 @@ int http_resolve(const char *url, char **out)
     argv[n++] = (char *)"%{url_effective}";
     argv[n++] = (char *)"--location";
     argv[n++] = (char *)"--connect-timeout";
-    argv[n++] = (char *)"15";
+    argv[n++] = (char *)"10";
     argv[n++] = (char *)"--max-time";
-    argv[n++] = (char *)"60";
+    argv[n++] = (char *)"20";
+    argv[n++] = (char *)"--retry";
+    argv[n++] = (char *)"3";
+    argv[n++] = (char *)"--retry-all-errors";
+    argv[n++] = (char *)"--retry-delay";
+    argv[n++] = (char *)"1";
     argv[n++] = (char *)"-A";
     argv[n++] = (char *)HTTP_UA;
     argv[n++] = (char *)url;
