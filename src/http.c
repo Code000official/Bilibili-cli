@@ -1,14 +1,13 @@
 /* http.c - 基于系统 curl 二进制的 HTTP 封装
  *
- * 不直接依赖 libcurl 头文件，而是 fork/exec 调用系统 curl，
+ * 不直接依赖 libcurl 头文件，而是 spawn 系统子进程调用 curl，
  * 借此获得重定向、断点续传、重试与 TLS 等能力，且零编译依赖。
  * argv 中全部为字符串字面量，无动态内存，无需逐项释放。
  */
 #include "http.h"
+#include "port.h"
 #include "util.h"
 
-#include <sys/wait.h>
-#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,16 +51,20 @@ static int curl_args(char **argv, const char *cookie, const char *max_time)
     return n;
 }
 
-static int wait_child(pid_t pid)
+/* 读取 PIPE 模式子进程全部 stdout 并等待退出；失败释放 sb 返回 -1 */
+static int read_all_and_wait(bili_pid_t pid, strbuf_t *sb)
 {
-    int st = 0;
-    if (waitpid(pid, &st, 0) < 0) {
+    char buf[8192];
+    long r;
+    while ((r = bili_child_read(buf, sizeof(buf))) > 0) {
+        sb_append_len(sb, buf, (size_t)r);
+    }
+    int rc = bili_wait(pid);
+    if (rc != 0) {
+        sb_free(sb);
         return -1;
     }
-    if (WIFEXITED(st)) {
-        return WEXITSTATUS(st);
-    }
-    return -1;
+    return 0;
 }
 
 int http_get_str_jar(const char *url, const char *cookie, const char *jarfile,
@@ -77,40 +80,14 @@ int http_get_str_jar(const char *url, const char *cookie, const char *jarfile,
     argv[n++] = (char *)url;
     argv[n] = NULL;
 
-    int pipefd[2];
-    if (pipe(pipefd) != 0) {
+    bili_pid_t pid = bili_spawn(argv, BILI_SPAWN_PIPE);
+    if (pid == BILI_PID_INVALID) {
         return -1;
     }
-
-    fflush(stdout);
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return -1;
-    }
-    if (pid == 0) {
-        dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[0]);
-        close(pipefd[1]);
-        execvp("curl", argv);
-        fprintf(stderr, "错误: 找不到 curl 命令\n");
-        _exit(127);
-    }
-    close(pipefd[1]);
 
     strbuf_t sb;
     sb_init(&sb);
-    char buf[8192];
-    ssize_t r;
-    while ((r = read(pipefd[0], buf, sizeof(buf))) > 0) {
-        sb_append_len(&sb, buf, (size_t)r);
-    }
-    close(pipefd[0]);
-
-    int rc = wait_child(pid);
-    if (rc != 0) {
-        sb_free(&sb);
+    if (read_all_and_wait(pid, &sb) != 0) {
         return -1;
     }
     *out = sb.data; /* 直接移交缓冲 */
@@ -162,17 +139,11 @@ int http_download(const char *url, const char *outfile, const char *cookie)
     argv[n++] = (char *)url;
     argv[n] = NULL;
 
-    fflush(stdout);
-    pid_t pid = fork();
-    if (pid < 0) {
+    bili_pid_t pid = bili_spawn(argv, BILI_SPAWN_INHERIT);
+    if (pid == BILI_PID_INVALID) {
         return -1;
     }
-    if (pid == 0) {
-        execvp("curl", argv);
-        fprintf(stderr, "错误: 找不到 curl 命令\n");
-        _exit(127);
-    }
-    return wait_child(pid);
+    return bili_wait(pid);
 }
 
 int http_resolve(const char *url, char **out)
@@ -183,7 +154,7 @@ int http_resolve(const char *url, char **out)
     argv[n++] = (char *)"curl";
     argv[n++] = (char *)"-sS";
     argv[n++] = (char *)"-o";
-    argv[n++] = (char *)"/dev/null";
+    argv[n++] = (char *)bili_null_device();
     argv[n++] = (char *)"-w";
     argv[n++] = (char *)"%{url_effective}";
     argv[n++] = (char *)"--location";
@@ -201,37 +172,17 @@ int http_resolve(const char *url, char **out)
     argv[n++] = (char *)url;
     argv[n] = NULL;
 
-    int pipefd[2];
-    if (pipe(pipefd) != 0) {
+    bili_pid_t pid = bili_spawn(argv, BILI_SPAWN_PIPE);
+    if (pid == BILI_PID_INVALID) {
         return -1;
     }
-    fflush(stdout);
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return -1;
-    }
-    if (pid == 0) {
-        dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[0]);
-        close(pipefd[1]);
-        execvp("curl", argv);
-        _exit(127);
-    }
-    close(pipefd[1]);
 
     strbuf_t sb;
     sb_init(&sb);
-    char buf[1024];
-    ssize_t r;
-    while ((r = read(pipefd[0], buf, sizeof(buf))) > 0) {
-        sb_append_len(&sb, buf, (size_t)r);
+    if (read_all_and_wait(pid, &sb) != 0) {
+        return -1;
     }
-    close(pipefd[0]);
-
-    int rc = wait_child(pid);
-    if (rc != 0 || sb.len == 0) {
+    if (sb.len == 0) {
         sb_free(&sb);
         return -1;
     }

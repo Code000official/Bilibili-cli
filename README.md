@@ -2,11 +2,14 @@
 
 B 站视频解析下载命令行工具，仅依赖系统 `curl` 与 `ffmpeg`，
 编译本身零外部依赖（第三方库已内嵌于 `src/vendor/`）。
+支持 Linux / Windows（Windows 10 及以上）。
 
 ## 构建
 
 构建逻辑统一在 [nob.c](nob.c)（基于 [tsoding/nob.h](https://github.com/tsoding/nob.h)，
 Public Domain 单头文件）。`nob.c` 变化后 `./nob` 会自动重建自身，无需手动干预。
+
+### Linux / macOS
 
 ```bash
 cc nob.c -o nob     # 首次引导
@@ -27,6 +30,26 @@ curl -O https://musl.libc.org/releases/musl-1.2.5.tar.gz && tar xzf musl-1.2.5.t
 mkdir build && cd build && ../musl-1.2.5/configure --prefix=$PWD/../install && make -j8 && make install
 cd ../.. && ./nob static
 ```
+
+### Windows
+
+需要 [MinGW-w64](https://www.mingw-w64.org/) 的 gcc（如
+[WinLibs](https://winlibs.com/) 或 MSYS2），以及 `curl.exe`（Windows 10+
+系统自带）和 `ffmpeg.exe` 在 PATH 中：
+
+```bat
+gcc nob.c -o nob.exe   # 首次引导
+nob.exe                # 构建 bili.exe（自动探测 gcc/clang/cc）
+nob.exe clean          # 清理产物
+```
+
+Windows 说明：
+
+- 运行需 PATH 里有 `curl` 与 `ffmpeg`；
+- `bili-static`（musl 静态链接）仅支持 Linux，Windows 下 `nob.exe` 会跳过并提示；
+- 全屏 TUI 依赖 Windows 10+ 控制台的 ANSI 转义支持（推荐 Windows Terminal），
+  程序会自动启用 VT 模式与 UTF-8 代码页（含中文路径/标题均按 UTF-8 处理）。
+
 番剧接口与普通视频共用一套 DASH 下载与混流逻辑（`pgc/player/web/playurl`，
 无需 WBI 签名）；`-e` 支持选集（`3` / `1,3,5-8` / `all`）。
 
@@ -82,7 +105,8 @@ qrcode/poll），终端以半块字符 + 固定 ANSI 颜色渲染二维码（不
 模块：`md5`（RFC 1321）、`wbi`（签名）、`bvid`（输入解析与 av/BV 互转）、
 `http`（系统 curl 封装）、`bili`（API 层）、`bangumi`（番剧）、`login`（扫码登录）、
 `term`（终端后端：raw 输入 + 差量重绘，零依赖）、`queue`（下载队列引擎，无线程）、
-`tui`（全屏界面）、`main`（入口与一次性命令）。
+`tui`（全屏界面）、`port`（POSIX/Windows 跨平台层：子进程、控制台、UTF-8 文件 API）、
+`main`（入口与一次性命令）。
 
 TUI 快捷键（统一为 Ctrl+字母；导航键除外）：
   - 首页：回车 解析；Backspace 删除；Ctrl-O 输出目录；Ctrl-L 登录；Ctrl-R 刷新状态；Ctrl-C 退出
@@ -104,5 +128,6 @@ TUI 快捷键（统一为 Ctrl+字母；导航键除外）：
 
 ```bash
 ./bili --selftest                    # 内置自检（MD5 / av-BV 转换）
+python3 test/tui_pty_keyboard_test.py  # TUI 键盘逻辑 pty 测试（输入/转义序列/退出）
 python3 test/tui_smoke_test.py       # TUI 端到端冒烟测试（pty 驱动，真实下载一条）
 ```

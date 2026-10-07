@@ -8,6 +8,7 @@
 #include "http.h"
 #include "login.h"
 #include "md5.h"
+#include "port.h"
 #include "tui.h"
 #include "util.h"
 #include "wbi.h"
@@ -15,10 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 #define BILI_VERSION "0.0.1"
 
@@ -80,7 +78,7 @@ static int parse_quality(const char *s, int *qn)
         { "720p", 64 }, { "480p", 32 }, { "360p", 16 },
     };
     for (size_t i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
-        if (strcasecmp(s, tbl[i].name) == 0) {
+        if (str_casecmp(s, tbl[i].name) == 0) {
             *qn = tbl[i].qn;
             return 0;
         }
@@ -112,7 +110,7 @@ static int parse_args(int argc, char **argv, opts_t *o)
                 fprintf(stderr, "错误: %s 需要参数\n", a);
                 return -1;
             }
-            if (strcasecmp(v, "all") == 0) {
+            if (str_casecmp(v, "all") == 0) {
                 o->page = -1;
             } else {
                 o->page = atoi(v);
@@ -161,7 +159,7 @@ static int parse_args(int argc, char **argv, opts_t *o)
             o->selftest = 1;
         } else if (strcmp(a, "--sign-test") == 0) {
             /* 隐藏选项: --sign-test <img_key> <sub_key> <wts> k=v... 输出签名结果 */
-            if (i + 4 > argc - 1) {
+            if (i + 3 > argc - 1) {
                 fprintf(stderr, "sign-test 参数不足\n");
                 return -1;
             }
@@ -174,6 +172,7 @@ static int parse_args(int argc, char **argv, opts_t *o)
                 char *kv = argv[++i];
                 char *eq = strchr(kv, '=');
                 if (!eq) {
+                    kv_free(ps, np);
                     return -1;
                 }
                 size_t kl = (size_t)(eq - kv);
@@ -183,9 +182,12 @@ static int parse_args(int argc, char **argv, opts_t *o)
             }
             char *q = NULL;
             if (wbi_sign_query_wts(img, sub, ps, np, wts, &q) != 0) {
+                kv_free(ps, np);
                 return -1;
             }
             printf("%s\n", q);
+            free(q);
+            kv_free(ps, np);
             return 100; /* 特殊退出：直接结束 */
         } else if (a[0] == '-' && a[1] != '\0') {
             fprintf(stderr, "错误: 未知选项 %s\n", a);
@@ -262,64 +264,20 @@ static char *build_cookie(const char *sessdata_override)
     return ck;
 }
 
-/* ---------- 流选择 ---------- */
-
-static const bili_stream_t *pick_video(const bili_playurl_t *pu, int want)
-{
-    if (pu->nvideos == 0) {
-        return NULL;
-    }
-    const bili_stream_t *best = &pu->videos[0];
-    for (int i = 1; i < pu->nvideos; i++) {
-        const bili_stream_t *s = &pu->videos[i];
-        int s_ok = s->id <= want, b_ok = best->id <= want;
-        if (s_ok && b_ok) {
-            best = s->id > best->id ? s : best;
-        } else if (s_ok) {
-            best = s; /* 已选的太高，当前更合适 */
-        } else if (!b_ok) {
-            best = s->id < best->id ? s : best; /* 都超了，取最低 */
-        }
-    }
-    return best;
-}
-
-static const bili_stream_t *pick_audio(const bili_playurl_t *pu)
-{
-    static const int prefer[] = { 30280, 30232, 30216 }; /* 192k > 132k > 64k */
-    for (size_t k = 0; k < sizeof(prefer) / sizeof(prefer[0]); k++) {
-        for (int i = 0; i < pu->naudios; i++) {
-            if (pu->audios[i].id == prefer[k]) {
-                return &pu->audios[i];
-            }
-        }
-    }
-    return pu->naudios ? &pu->audios[0] : NULL;
-}
-
 /* ---------- 下载与混流 ---------- */
 
 static long long file_size(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 ? (long long)st.st_size : -1;
+    return bili_file_size(path);
 }
 
 static int run_child(char **argv)
 {
-    fflush(stdout);
-    pid_t pid = fork();
-    if (pid < 0) {
+    bili_pid_t pid = bili_spawn(argv, BILI_SPAWN_INHERIT);
+    if (pid == BILI_PID_INVALID) {
         return -1;
     }
-    if (pid == 0) {
-        execvp(argv[0], argv);
-        fprintf(stderr, "错误: 找不到 %s 命令\n", argv[0]);
-        _exit(127);
-    }
-    int st = 0;
-    waitpid(pid, &st, 0);
-    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    return bili_wait(pid);
 }
 
 static int mux_streams(const char *v, const char *a, const char *out, int mp4)
@@ -385,7 +343,7 @@ static int download_durl(const bili_playurl_t *pu, const char *dir,
     printf("该视频无 DASH 流，使用 durl 模式（%d 段）\n", pu->ndurls);
     char *list_path = xmalloc(strlen(dir) + strlen(base) + 16);
     sprintf(list_path, "%s/%s.concat.txt", dir, base);
-    FILE *lp = fopen(list_path, "w");
+    FILE *lp = bili_fopen(list_path, "w");
     if (!lp) {
         free(list_path);
         return -1;
@@ -436,7 +394,7 @@ static int download_durl(const bili_playurl_t *pu, const char *dir,
         for (int i = 0; i < pu->ndurls; i++) {
             char *seg = xmalloc(strlen(dir) + strlen(base) + 32);
             sprintf(seg, "%s/%s.seg%d.mp4", dir, base, i);
-            remove(seg);
+            bili_remove(seg);
             free(seg);
         }
         ok = 0;
@@ -449,7 +407,7 @@ out:
     if (lp) {
         fclose(lp);
     }
-    remove(list_path);
+    bili_remove(list_path);
     free(list_path);
     return ok;
 }
@@ -472,8 +430,8 @@ static int download_playurl(const bili_playurl_t *pu, const opts_t *o,
         return download_durl(pu, dir, base, cookie, o);
     }
 
-    const bili_stream_t *v = pick_video(pu, o->qn ? o->qn : (1 << 30));
-    const bili_stream_t *a = o->video_only ? NULL : pick_audio(pu);
+    const bili_stream_t *v = bili_pick_video(pu, o->qn ? o->qn : (1 << 30));
+    const bili_stream_t *a = o->video_only ? NULL : bili_pick_audio(pu);
     if (o->audio_only) {
         v = NULL;
     }
@@ -509,13 +467,34 @@ static int download_playurl(const bili_playurl_t *pu, const opts_t *o,
         }
     }
 
+    if (o->no_mux && v && a) {
+        /* 明确不混流且双流都在：两路分别改名保留 */
+        char *fv = xmalloc(strlen(dir) + strlen(base) + 16);
+        char *fa = xmalloc(strlen(dir) + strlen(base) + 16);
+        sprintf(fv, "%s/%s.video.m4s", dir, base);
+        sprintf(fa, "%s/%s.audio.m4s", dir, base);
+        int ok = bili_rename(vpath, fv) == 0 && bili_rename(apath, fa) == 0;
+        if (!ok) {
+            fprintf(stderr, "错误: 无法命名输出文件 %s / %s\n", fv, fa);
+        } else {
+            long long szv = file_size(fv), sza = file_size(fa);
+            printf("已完成: %s (%s)\n", fv, human_size((uint64_t)(szv > 0 ? szv : 0)));
+            printf("已完成: %s (%s)\n", fa, human_size((uint64_t)(sza > 0 ? sza : 0)));
+        }
+        free(fv);
+        free(fa);
+        free(vpath);
+        free(apath);
+        return ok ? 0 : -1;
+    }
+
     if (o->no_mux || !v || !a) {
-        /* 不混流或只有单流：保留/改名最终文件 */
+        /* 只有单流：保留/改名最终文件 */
         const char *src = v ? vpath : apath;
         char *final = xmalloc(strlen(dir) + strlen(base) + 8);
         sprintf(final, "%s/%s.%s", dir, base, v ? (o->no_mux ? "video.m4s" : "mp4")
                                                 : (o->no_mux ? "audio.m4s" : "m4a"));
-        if (rename(src, final) != 0) {
+        if (bili_rename(src, final) != 0) {
             fprintf(stderr, "错误: 无法命名输出文件 %s\n", final);
             free(final);
             goto fail;
@@ -536,8 +515,8 @@ static int download_playurl(const bili_playurl_t *pu, const opts_t *o,
         free(out);
         goto fail;
     }
-    remove(vpath);
-    remove(apath);
+    bili_remove(vpath);
+    bili_remove(apath);
     long long sz = file_size(out);
     printf("已完成: %s (%s)\n", out, human_size((uint64_t)(sz > 0 ? sz : 0)));
     free(out);
@@ -606,7 +585,7 @@ static int show_info(const bili_view_t *view, const opts_t *o,
     }
     printf("\n");
     if (pu.nvideos > 0) {
-        const bili_stream_t *v = pick_video(&pu, o->qn ? o->qn : (1 << 30));
+        const bili_stream_t *v = bili_pick_video(&pu, o->qn ? o->qn : (1 << 30));
         if (pu.quality < 80) {
             printf("提示: 未登录最高约 480P，运行 bili login 扫码登录可解锁\n");
         }
@@ -630,7 +609,7 @@ static int *parse_episode_spec(const char *spec, int neps, int *out_n)
     }
     int *sel = xmalloc(sizeof(int) * (size_t)neps);
     int n = 0;
-    if (strcasecmp(spec, "all") == 0) {
+    if (str_casecmp(spec, "all") == 0) {
         for (int i = 0; i < neps; i++) {
             sel[n++] = i;
         }
@@ -968,6 +947,8 @@ static int repl(void)
 
 int main(int argc, char **argv)
 {
+    bili_console_init(); /* Windows: 启用 ANSI 转义 + UTF-8 代码页；POSIX 无操作 */
+
     /* 内置子命令 */
     if (argc >= 2) {
         if (strcmp(argv[1], "login") == 0) {
@@ -1059,6 +1040,7 @@ static int dispatch(opts_t *o)
     char *img = NULL, *sub = NULL;
     if (bili_get_wbi_keys(cookie, &img, &sub, o->verbose) != 0) {
         fprintf(stderr, "错误: 获取 WBI 密钥失败，无法继续\n");
+        free(cookie);
         return 1;
     }
 
@@ -1066,6 +1048,9 @@ static int dispatch(opts_t *o)
     if (bili_view(bvid, cookie, img, sub, o->verbose, &view) != 0) {
         fprintf(stderr, "错误: 获取视频信息失败\n");
         free(bvid);
+        free(cookie);
+        free(img);
+        free(sub);
         return 1;
     }
     free(bvid);

@@ -3,7 +3,8 @@
 #define BILI_CLI_QUEUE_H
 
 #include <stdint.h>
-#include <sys/types.h>
+
+#include "port.h"
 
 typedef enum {
     JOB_PENDING = 0,   /* 等待开始 */
@@ -42,7 +43,7 @@ typedef struct {
     char *vurl, *aurl;
     uint64_t vsize, asize; /* 期望大小（API 可能不给，0=未知） */
     int attempts;          /* 当前阶段重试次数 */
-    pid_t pid;             /* 活动 curl/ffmpeg 子进程 */
+    bili_pid_t pid;        /* 活动 curl/ffmpeg 子进程 */
     int has_child;
 } bjob_t;
 

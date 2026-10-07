@@ -23,6 +23,9 @@ void *xrealloc(void *p, size_t n);
 char *xstrdup(const char *s);
 char *xstrndup(const char *s, size_t n);
 
+/* ASCII 大小写不敏感比较（strcasecmp 的可移植替代） */
+int str_casecmp(const char *a, const char *b);
+
 /* RFC 3986 百分号编码（空格编码为 %20） */
 char *url_encode(const char *s);
 

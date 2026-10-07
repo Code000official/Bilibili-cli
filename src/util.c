@@ -1,6 +1,8 @@
 /* util.c - 字符串缓冲、编码、文件名处理等基础工具 */
 #include "util.h"
 
+#include "port.h"
+
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +11,20 @@
 #include <sys/types.h>
 #include <stdarg.h>
 #include <errno.h>
+
+int str_casecmp(const char *a, const char *b)
+{
+    while (*a && *b) {
+        int ca = tolower((unsigned char)*a);
+        int cb = tolower((unsigned char)*b);
+        if (ca != cb) {
+            return ca - cb;
+        }
+        a++;
+        b++;
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
 
 void sb_init(strbuf_t *sb)
 {
@@ -140,17 +156,36 @@ char *url_decode(const char *s)
 
 char *state_dir(void)
 {
-    const char *xdg = getenv("XDG_STATE_HOME");
-    const char *home = getenv("HOME");
-    char *dir;
-    if (xdg && *xdg) {
-        dir = xmalloc(strlen(xdg) + 16);
+    char *xdg = bili_getenv("XDG_STATE_HOME");
+    if (xdg) {
+        char *dir = xmalloc(strlen(xdg) + 16);
         sprintf(dir, "%s/bili-cli", xdg);
-    } else {
-        dir = xmalloc(strlen(home) + 32);
-        sprintf(dir, "%s/.local/state/bili-cli", home);
+        free(xdg);
+        return dir;
     }
+#ifdef _WIN32
+    /* %LOCALAPPDATA%\bili-cli（依次回退 APPDATA / USERPROFILE） */
+    static const char *keys[] = { "LOCALAPPDATA", "APPDATA", "USERPROFILE" };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        char *base = bili_getenv(keys[i]);
+        if (base) {
+            char *dir = xmalloc(strlen(base) + 16);
+            sprintf(dir, "%s/bili-cli", base);
+            free(base);
+            return dir;
+        }
+    }
+#else
+    char *base = bili_getenv("HOME");
+    if (!base) {
+        base = xstrdup(".");
+    }
+    char *dir = xmalloc(strlen(base) + 32);
+    sprintf(dir, "%s/.local/state/bili-cli", base);
+    free(base);
     return dir;
+#endif
+    return xstrdup("./bili-cli");
 }
 
 char *sanitize_filename(const char *name)
@@ -187,20 +222,24 @@ int mkdir_p(const char *path)
 {
     char *tmp = xstrdup(path);
     size_t len = strlen(tmp);
-    if (len && tmp[len - 1] == '/') {
+    if (len && (tmp[len - 1] == '/' || tmp[len - 1] == '\\')) {
         tmp[len - 1] = '\0';
     }
     for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
+        if (*p == '/' || *p == '\\') {
+            /* 跳过盘符前缀（如 C:\），不创建 "C:" */
+            if (p - tmp == 2 && tmp[1] == ':') {
+                continue;
+            }
             *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+            if (bili_mkdir(tmp) != 0 && errno != EEXIST) {
                 free(tmp);
                 return -1;
             }
             *p = '/';
         }
     }
-    int rc = mkdir(tmp, 0755);
+    int rc = bili_mkdir(tmp);
     free(tmp);
     return (rc == 0 || errno == EEXIST) ? 0 : -1;
 }

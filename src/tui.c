@@ -11,6 +11,7 @@
 #include "bvid.h"
 #include "http.h"
 #include "login.h"
+#include "port.h"
 #include "queue.h"
 #include "term.h"
 #include "util.h"
@@ -20,7 +21,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 static void show_loading(const char *text);
 
@@ -100,7 +100,8 @@ static void clip_text(char *out, size_t outn, const char *s, int maxw)
         if (w + cw > maxw - 1) {
             break;
         }
-        if (bi + n >= outn) {
+        /* 预留省略号 "…"（3 字节）+ NUL 的空间 */
+        if (bi + (size_t)n + 4 > outn) {
             break;
         }
         w += cw;
@@ -120,11 +121,15 @@ static void clip_text(char *out, size_t outn, const char *s, int maxw)
             bi = p;
             (void)n;
         }
-        memcpy(out, s, bi);
+        if (out != s) {
+            memcpy(out, s, bi);
+        }
         out[bi] = '\0';
         strcat(out, "…");
     } else {
-        memcpy(out, s, bi);
+        if (out != s) {
+            memcpy(out, s, bi);
+        }
         out[bi] = '\0';
     }
 }
@@ -909,8 +914,11 @@ int tui_main(void)
     U.outdir[0] = '.';
     U.outdir[1] = '\0';
 
-    /* TUI 模式下库层错误输出重定向到日志，避免破坏屏幕 */
-    freopen("bili-tui.log", "a", stderr);
+    /* TUI 模式下库层错误输出重定向到日志，避免破坏屏幕；
+     * 日志打不开（只读目录等）时退到 NUL，stderr 不能保持 NULL */
+    if (!freopen("bili-tui.log", "a", stderr)) {
+        freopen(bili_null_device(), "w", stderr);
+    }
 
     term_init();
 

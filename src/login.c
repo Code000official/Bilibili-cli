@@ -11,6 +11,7 @@
 
 #include "bili.h"
 #include "http.h"
+#include "port.h"
 
 #include <cJSON.h>
 #include <qrcodegen.h>
@@ -18,7 +19,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #define QR_GEN  "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
 #define QR_POLL "https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key="
@@ -69,7 +69,7 @@ static char *cookie_path(void)
 void login_load_cookies(kv_t **arr, size_t *n)
 {
     char *path = cookie_path();
-    FILE *fp = fopen(path, "r");
+    FILE *fp = bili_fopen(path, "r");
     free(path);
     if (!fp) {
         return;
@@ -94,7 +94,7 @@ void login_load_cookies(kv_t **arr, size_t *n)
 static void save_cookies(const kv_t *kv, size_t n)
 {
     char *path = cookie_path();
-    FILE *fp = fopen(path, "w");
+    FILE *fp = bili_fopen(path, "w");
     if (!fp) {
         fprintf(stderr, "错误: 无法写入 %s\n", path);
         free(path);
@@ -158,7 +158,7 @@ char *login_build_cookie(const char *b3, const char *b4,
 int login_logout(void)
 {
     char *path = cookie_path();
-    int rc = unlink(path);
+    int rc = bili_remove(path);
     free(path);
     if (rc == 0) {
         printf("已退出登录\n");
@@ -254,7 +254,7 @@ static void collect_cookies_from_url(const char *url, kv_t **arr, size_t *n)
  * HttpOnly 行以 "#HttpOnly_" 开头。 */
 static void collect_cookies_from_jar(const char *path, kv_t **arr, size_t *n)
 {
-    FILE *fp = fopen(path, "r");
+    FILE *fp = bili_fopen(path, "r");
     if (!fp) {
         return;
     }
@@ -336,14 +336,14 @@ int login_qr_flow(int verbose)
             jar = xmalloc(strlen(dir) + 16);
             sprintf(jar, "%s/login.jar", dir);
             free(dir);
-            remove(jar);
+            bili_remove(jar);
         }
         free(qrurl);
 
         /* 轮询 */
         int scanned = 0, expired = 0;
         for (int t = 0; t < POLL_ROUNDS; t++) {
-            sleep(2);
+            bili_sleep_ms(2000);
             char *purl = xmalloc(strlen(QR_POLL) + strlen(qrkey) + 1);
             sprintf(purl, "%s%s", QR_POLL, qrkey);
             char *pbody = NULL;
@@ -386,7 +386,7 @@ int login_qr_flow(int verbose)
                 if (durl) {
                     collect_cookies_from_url(durl, &kv, &nk);
                 }
-                remove(jar);
+                bili_remove(jar);
                 free(jar);
                 free(durl);
                 durl = NULL;
@@ -396,7 +396,7 @@ int login_qr_flow(int verbose)
                             "错误: 未能从登录响应中提取 SESSDATA（SET-COOKIE 与"
                             " data.url 均无凭证）。\n"
                             "      原始响应已写入 bili-login-debug.log，请带着该文件反馈。\n");
-                    FILE *dbg = fopen("bili-login-debug.log", "w");
+                    FILE *dbg = bili_fopen("bili-login-debug.log", "w");
                     if (dbg) {
                         fprintf(dbg, "%s\n", pbody ? pbody : "(空)");
                         fclose(dbg);
@@ -427,6 +427,7 @@ int login_qr_flow(int verbose)
             fprintf(stderr, "\n登录失败 (%lld)，请重试\n", code);
             free(durl);
             free(pbody);
+            free(jar);
             free(qrkey);
             return 1;
         }
@@ -485,7 +486,7 @@ int login_status_local(const char *cookie, char **uname)
         char *path = xmalloc(strlen(dir) + 16);
         sprintf(path, "%s/uname.txt", dir);
         free(dir);
-        FILE *fp = fopen(path, "r");
+        FILE *fp = bili_fopen(path, "r");
         free(path);
         if (fp) {
             char line[128];
@@ -514,7 +515,7 @@ void login_save_uname(const char *uname)
     char *path = xmalloc(strlen(dir) + 16);
     sprintf(path, "%s/uname.txt", dir);
     free(dir);
-    FILE *fp = fopen(path, "w");
+    FILE *fp = bili_fopen(path, "w");
     if (fp) {
         fprintf(fp, "%s\n", uname);
         fclose(fp);

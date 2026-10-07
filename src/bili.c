@@ -6,6 +6,7 @@
  */
 #include "bili.h"
 #include "http.h"
+#include "port.h"
 #include "util.h"
 #include "wbi.h"
 
@@ -15,7 +16,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #define API_SPI   "https://api.bilibili.com/x/frontend/finger/spi"
 #define API_NAV   "https://api.bilibili.com/x/web-interface/nav"
@@ -57,15 +57,36 @@ const char *bili_qn_name(int qn)
 
 static char *cache_dir(void)
 {
-    const char *xdg = getenv("XDG_CACHE_HOME");
-    const char *home = getenv("HOME");
-    char *dir = xmalloc(strlen(xdg ? xdg : home) + 32);
+    char *xdg = bili_getenv("XDG_CACHE_HOME");
     if (xdg) {
+        char *dir = xmalloc(strlen(xdg) + 16);
         sprintf(dir, "%s/bili-cli", xdg);
-    } else {
-        sprintf(dir, "%s/.cache/bili-cli", home);
+        free(xdg);
+        return dir;
     }
+#ifdef _WIN32
+    /* %LOCALAPPDATA%\bili-cli（依次回退 APPDATA / USERPROFILE） */
+    static const char *keys[] = { "LOCALAPPDATA", "APPDATA", "USERPROFILE" };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        char *base = bili_getenv(keys[i]);
+        if (base) {
+            char *dir = xmalloc(strlen(base) + 16);
+            sprintf(dir, "%s/bili-cli", base);
+            free(base);
+            return dir;
+        }
+    }
+#else
+    char *base = bili_getenv("HOME");
+    if (!base) {
+        base = xstrdup(".");
+    }
+    char *dir = xmalloc(strlen(base) + 32);
+    sprintf(dir, "%s/.cache/bili-cli", base);
+    free(base);
     return dir;
+#endif
+    return xstrdup("./bili-cli");
 }
 
 /* 读缓存文件；每行一个字段，返回字段数（文件不存在返回 -1） */
@@ -76,7 +97,7 @@ static int cache_read(const char *name, char ***fields_out)
     sprintf(path, "%s/%s", dir, name);
     free(dir);
 
-    FILE *fp = fopen(path, "r");
+    FILE *fp = bili_fopen(path, "r");
     free(path);
     if (!fp) {
         return -1;
@@ -106,7 +127,7 @@ static void cache_write(const char *name, const char *const *fields, int n)
     sprintf(path, "%s/%s", dir, name);
     free(dir);
 
-    FILE *fp = fopen(path, "w");
+    FILE *fp = bili_fopen(path, "w");
     if (!fp) {
         free(path);
         return;
@@ -145,7 +166,7 @@ static char *jstream_url(cJSON *item)
     /* 协议相对地址补全 */
     if (u && u[0] == '/') {
         size_t l = strlen(u);
-        char *full = xmalloc(l + 6);
+        char *full = xmalloc(l + 7);
         memcpy(full, "https:", 6);
         memcpy(full + 6, u, l + 1);
         free(u);
@@ -382,7 +403,12 @@ int bili_view(const char *bvid, const char *cookie,
         }
     }
     cJSON_Delete(root);
-    return (out->npages > 0) ? 0 : -1;
+    if (out->npages == 0) {
+        /* 失败契约：返回 -1 时 out 已自清理，调用方无需再 free */
+        bili_view_free(out);
+        return -1;
+    }
+    return 0;
 }
 
 void bili_view_free(bili_view_t *v)
@@ -436,8 +462,11 @@ int bili_parse_playurl_json(const char *body, bili_playurl_t *out)
         cJSON *it;
         cJSON_ArrayForEach(it, accept)
         {
-            out->accept[i++] = (int)cJSON_GetNumberValue(it);
+            if (cJSON_IsNumber(it)) {
+                out->accept[i++] = (int)cJSON_GetNumberValue(it);
+            }
         }
+        out->naccept = i;
     }
 
     cJSON *dash = cJSON_GetObjectItemCaseSensitive(data, "dash");
@@ -495,6 +524,8 @@ int bili_parse_playurl_json(const char *body, bili_playurl_t *out)
     cJSON_Delete(root);
     if (out->nvideos == 0 && out->ndurls == 0) {
         fprintf(stderr, "错误: 响应中没有可下载的媒体流\n");
+        /* 失败契约：返回 -1 时 out 已自清理，调用方无需再 free */
+        bili_playurl_free(out);
         return -1;
     }
     return 0;
@@ -565,4 +596,39 @@ void bili_playurl_free(bili_playurl_t *p)
     free(p->durls);
     free(p->dsizes);
     memset(p, 0, sizeof(*p));
+}
+
+/* ---------- ��ѡ��main/queue ���ã� ---------- */
+
+const bili_stream_t *bili_pick_video(const bili_playurl_t *pu, int want)
+{
+    if (pu->nvideos == 0) {
+        return NULL;
+    }
+    const bili_stream_t *best = &pu->videos[0];
+    for (int i = 1; i < pu->nvideos; i++) {
+        const bili_stream_t *s = &pu->videos[i];
+        int s_ok = s->id <= want, b_ok = best->id <= want;
+        if (s_ok && b_ok) {
+            best = s->id > best->id ? s : best;
+        } else if (s_ok) {
+            best = s; /* ��ѡ��̫�ߣ���ǰ������ */
+        } else if (!b_ok) {
+            best = s->id < best->id ? s : best; /* �����ˣ�ȡ��� */
+        }
+    }
+    return best;
+}
+
+const bili_stream_t *bili_pick_audio(const bili_playurl_t *pu)
+{
+    static const int prefer[] = { 30280, 30232, 30216 }; /* 192k > 132k > 64k */
+    for (size_t k = 0; k < sizeof(prefer) / sizeof(prefer[0]); k++) {
+        for (int i = 0; i < pu->naudios; i++) {
+            if (pu->audios[i].id == prefer[k]) {
+                return &pu->audios[i];
+            }
+        }
+    }
+    return pu->naudios ? &pu->audios[0] : NULL;
 }

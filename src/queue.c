@@ -2,8 +2,8 @@
  *
  * 设计：无线程。每条任务是一个小状态机，bq_tick() 由 UI 主循环周期调用：
  *   - 任务开始时同步取播放地址（约1秒，一次一条，其余时间非阻塞）
- *   - 下载阶段 fork/exec curl 子进程（stderr 指向 /dev/null 以免干扰 TUI），
- *     waitpid(WNOHANG) 检查完成，stat 部分文件大小计算进度
+ *   - 下载阶段 spawn 静默 curl 子进程（输出丢弃以免干扰 TUI），
+ *     非阻塞轮询检查完成，stat 部分文件大小计算进度
  *   - 完成后 spawn ffmpeg 混流
  */
 #include "queue.h"
@@ -11,78 +11,29 @@
 #include "bangumi.h"
 #include "bili.h"
 #include "http.h"
+#include "port.h"
 #include "util.h"
 
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 #define MAX_ATTEMPTS 2
 
-/* 与 main.c 中 pick_video/pick_audio 相同的选流逻辑 */
-static const bili_stream_t *q_pick_video(const bili_playurl_t *pu, int want)
-{
-    if (pu->nvideos == 0) {
-        return NULL;
-    }
-    const bili_stream_t *best = &pu->videos[0];
-    for (int i = 1; i < pu->nvideos; i++) {
-        const bili_stream_t *s = &pu->videos[i];
-        int s_ok = s->id <= want, b_ok = best->id <= want;
-        if (s_ok && b_ok) {
-            best = s->id > best->id ? s : best;
-        } else if (s_ok) {
-            best = s;
-        } else if (!b_ok) {
-            best = s->id < best->id ? s : best;
-        }
-    }
-    return best;
-}
-
-static const bili_stream_t *q_pick_audio(const bili_playurl_t *pu)
-{
-    static const int prefer[] = { 30280, 30232, 30216 };
-    for (size_t k = 0; k < sizeof(prefer) / sizeof(prefer[0]); k++) {
-        for (int i = 0; i < pu->naudios; i++) {
-            if (pu->audios[i].id == prefer[k]) {
-                return &pu->audios[i];
-            }
-        }
-    }
-    return pu->naudios ? &pu->audios[0] : NULL;
-}
-
 static long long fsize(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 ? (long long)st.st_size : -1;
+    return bili_file_size(path);
 }
 
 /* ---------- 子进程 ---------- */
 
-/* TUI 模式下子进程输出必须静默，避免破坏屏幕 */
-static pid_t spawn_child(char **argv)
+/* TUI 模式下子进程输出必须静默，避免破坏屏幕（port 层重定向到 NUL） */
+static bili_pid_t spawn_child(char **argv)
 {
-    fflush(NULL);
-    pid_t pid = fork();
-    if (pid < 0) {
-        return -1;
-    }
-    if (pid == 0) {
-        freopen("/dev/null", "w", stderr);
-        freopen("/dev/null", "w", stdout);
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    return pid;
+    return bili_spawn(argv, BILI_SPAWN_SILENT);
 }
 
-static pid_t spawn_curl(const char *url, const char *outfile, const char *cookie)
+static bili_pid_t spawn_curl(const char *url, const char *outfile, const char *cookie)
 {
     char *argv[40];
     int n = 0;
@@ -122,7 +73,7 @@ static pid_t spawn_curl(const char *url, const char *outfile, const char *cookie
     return spawn_child(argv);
 }
 
-static pid_t spawn_mux(const char *v, const char *a, const char *out, int mp4)
+static bili_pid_t spawn_mux(const char *v, const char *a, const char *out, int mp4)
 {
     char *argv[20];
     int n = 0;
@@ -219,9 +170,9 @@ void bq_cancel(bqueue_t *q, int idx)
     if (j->state == JOB_DONE || j->state == JOB_CANCELED) {
         return;
     }
-    if (j->has_child && j->pid > 0) {
-        kill(j->pid, SIGTERM);
-        waitpid(j->pid, NULL, 0);
+    if (j->has_child && j->pid != BILI_PID_INVALID) {
+        bili_kill(j->pid);
+        bili_wait(j->pid);
         j->has_child = 0;
     }
     free(j->vurl);
@@ -267,8 +218,8 @@ static int job_start(bqueue_t *q, bjob_t *j)
         return -1;
     }
 
-    const bili_stream_t *v = j->audio_only ? NULL : q_pick_video(&pu, j->qn ? j->qn : (1 << 30));
-    const bili_stream_t *a = j->video_only ? NULL : q_pick_audio(&pu);
+    const bili_stream_t *v = j->audio_only ? NULL : bili_pick_video(&pu, j->qn ? j->qn : (1 << 30));
+    const bili_stream_t *a = j->video_only ? NULL : bili_pick_audio(&pu);
     if (!v && !a) {
         bili_playurl_free(&pu);
         j->state = JOB_FAILED;
@@ -308,34 +259,35 @@ static int job_start(bqueue_t *q, bjob_t *j)
 
     if (need_v) {
         j->pid = spawn_curl(j->vurl, j->vpath, q->cookie);
-        j->has_child = j->pid > 0;
+        j->has_child = j->pid != BILI_PID_INVALID;
         j->state = JOB_DL_VIDEO;
         snprintf(j->note, sizeof(j->note), "下载视频流");
-        if (j->pid < 0) {
+        if (j->pid == BILI_PID_INVALID) {
             j->state = JOB_FAILED;
             snprintf(j->err, sizeof(j->err), "无法启动 curl");
         }
     } else if (need_a) {
         j->pid = spawn_curl(j->aurl, j->apath, q->cookie);
-        j->has_child = j->pid > 0;
+        j->has_child = j->pid != BILI_PID_INVALID;
         j->state = JOB_DL_AUDIO;
         snprintf(j->note, sizeof(j->note), "下载音频流");
-        if (j->pid < 0) {
+        if (j->pid == BILI_PID_INVALID) {
             j->state = JOB_FAILED;
             snprintf(j->err, sizeof(j->err), "无法启动 curl");
         }
     } else if (j->no_mux || !v || !a) {
         /* 全部已存在，直接改名 */
         const char *src = v ? j->vpath : j->apath;
-        rename(src, j->outpath);
+        bili_remove(j->outpath);
+        bili_rename(src, j->outpath);
         j->state = JOB_DONE;
         snprintf(j->note, sizeof(j->note), "已完成（文件已存在）");
     } else {
         j->pid = spawn_mux(j->vpath, j->apath, j->outpath, j->mp4);
-        j->has_child = j->pid > 0;
+        j->has_child = j->pid != BILI_PID_INVALID;
         j->state = JOB_MUXING;
         snprintf(j->note, sizeof(j->note), "混流");
-        if (j->pid < 0) {
+        if (j->pid == BILI_PID_INVALID) {
             j->state = JOB_FAILED;
             snprintf(j->err, sizeof(j->err), "无法启动 ffmpeg");
         }
@@ -349,7 +301,8 @@ static void job_to_mux(bjob_t *j)
     if (j->no_mux || !j->vurl || !j->aurl) {
         /* 单流：改名即完成 */
         const char *src = j->vurl ? j->vpath : j->apath;
-        if (rename(src, j->outpath) != 0) {
+        bili_remove(j->outpath);
+        if (bili_rename(src, j->outpath) != 0) {
             j->state = JOB_FAILED;
             snprintf(j->err, sizeof(j->err), "无法命名输出文件");
             return;
@@ -359,19 +312,19 @@ static void job_to_mux(bjob_t *j)
         return;
     }
     j->pid = spawn_mux(j->vpath, j->apath, j->outpath, j->mp4);
-    j->has_child = j->pid > 0;
+    j->has_child = j->pid != BILI_PID_INVALID;
     j->state = JOB_MUXING;
     snprintf(j->note, sizeof(j->note), "混流中...");
-    if (j->pid < 0) {
+    if (j->pid == BILI_PID_INVALID) {
         j->state = JOB_FAILED;
         snprintf(j->err, sizeof(j->err), "无法启动 ffmpeg");
     }
 }
 
 /* 下载阶段子进程结束处理：0=进入下一阶段，-1=失败需重试，1=仍在运行 */
-static int job_dl_finished(bqueue_t *q, bjob_t *j, int status)
+static int job_dl_finished(bqueue_t *q, bjob_t *j, int exit_code)
 {
-    int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    int rc = exit_code;
     int is_video = (j->state == JOB_DL_VIDEO);
     const char *path = is_video ? j->vpath : j->apath;
     uint64_t want = is_video ? j->vsize : j->asize;
@@ -382,7 +335,12 @@ static int job_dl_finished(bqueue_t *q, bjob_t *j, int status)
         if (++j->attempts <= MAX_ATTEMPTS) {
             /* 断点续传重试 */
             j->pid = spawn_curl(is_video ? j->vurl : j->aurl, path, q->cookie);
-            j->has_child = j->pid > 0;
+            j->has_child = j->pid != BILI_PID_INVALID;
+            if (!j->has_child) {
+                j->state = JOB_FAILED;
+                snprintf(j->err, sizeof(j->err), "无法启动 curl");
+                return -1;
+            }
             snprintf(j->note, sizeof(j->note), "重试 %d/%d", j->attempts, MAX_ATTEMPTS);
             return 1;
         }
@@ -393,9 +351,13 @@ static int job_dl_finished(bqueue_t *q, bjob_t *j, int status)
     j->attempts = 0;
     if (is_video && j->aurl) {
         j->pid = spawn_curl(j->aurl, j->apath, q->cookie);
-        j->has_child = j->pid > 0;
+        j->has_child = j->pid != BILI_PID_INVALID;
         j->state = JOB_DL_AUDIO;
         snprintf(j->note, sizeof(j->note), "下载音频流");
+        if (!j->has_child) {
+            j->state = JOB_FAILED;
+            snprintf(j->err, sizeof(j->err), "无法启动 curl");
+        }
         return 0;
     }
     job_to_mux(j);
@@ -414,8 +376,9 @@ static void job_update_progress(bjob_t *j)
         got = 0;
     }
     if (want > 0) {
-        snprintf(j->note, sizeof(j->note), "下载中 %s/%s",
-                 human_size((uint64_t)got), human_size(want));
+        char have[32];
+        snprintf(have, sizeof(have), "%s", human_size((uint64_t)got));
+        snprintf(j->note, sizeof(j->note), "下载中 %s/%s", have, human_size(want));
     } else {
         snprintf(j->note, sizeof(j->note), "下载中 %s", human_size((uint64_t)got));
     }
@@ -446,7 +409,7 @@ void bq_tick(bqueue_t *q)
         bjob_t *j = &q->jobs[i];
         if (j->state == JOB_DL_VIDEO || j->state == JOB_DL_AUDIO || j->state == JOB_MUXING) {
             int st = 0;
-            pid_t r = j->has_child ? waitpid(j->pid, &st, WNOHANG) : 0;
+            int r = j->has_child ? bili_poll(j->pid, &st) : 0;
             if (r == 0) {
                 job_update_progress(j);
                 continue;
@@ -456,9 +419,9 @@ void bq_tick(bqueue_t *q)
             }
             j->has_child = 0;
             if (j->state == JOB_MUXING) {
-                if (WIFEXITED(st) && WEXITSTATUS(st) == 0) {
-                    remove(j->vpath);
-                    remove(j->apath);
+                if (st == 0) {
+                    bili_remove(j->vpath);
+                    bili_remove(j->apath);
                     j->state = JOB_DONE;
                     long long sz = fsize(j->outpath);
                     snprintf(j->note, sizeof(j->note), "完成 %s",

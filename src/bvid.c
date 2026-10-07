@@ -65,10 +65,11 @@ uint64_t bvid_bv2av(const char *bvid)
     return (tmp & 2251799813685247ULL) ^ 23442827791579ULL;
 }
 
-/* 校验从 pos 开始是否为合法 BV 号，是则返回 malloc 拷贝 */
+/* 校验从 pos 开始是否为合法 BV 号，是则返回 malloc 拷贝。
+ * 前缀大小写不敏感（用户常输入小写 bv），结果统一归一化为大写 "BV" */
 static char *try_bv_at(const char *s)
 {
-    if (s[0] != 'B' || s[1] != 'V') {
+    if ((s[0] != 'B' && s[0] != 'b') || (s[1] != 'V' && s[1] != 'v')) {
         return NULL;
     }
     for (int i = 2; i < BVID_LEN; i++) {
@@ -76,7 +77,10 @@ static char *try_bv_at(const char *s)
             return NULL;
         }
     }
-    return xstrndup(s, BVID_LEN);
+    char *bv = xstrndup(s, BVID_LEN);
+    bv[0] = 'B';
+    bv[1] = 'V';
+    return bv;
 }
 
 /* 从字符串中提取 "?...&p=N" 的分P号 */
@@ -196,9 +200,9 @@ bvid_result_t bvid_parse_input(const char *input, char **bvid_out,
         }
     }
 
-    /* URL：在任意位置找 BV 号，并提取 ?p= 参数 */
+    /* URL：在任意位置找 BV 号（大小写不敏感），并提取 ?p= 参数 */
     for (const char *p = input; *p; p++) {
-        if (p[0] == 'B' && p[1] == 'V') {
+        if ((p[0] == 'B' || p[0] == 'b') && (p[1] == 'V' || p[1] == 'v')) {
             char *bv = try_bv_at(p);
             if (bv) {
                 *bvid_out = bv;

@@ -4,19 +4,88 @@
  * NOB_GO_REBUILD_URSELF 会在运行时检测 nob.c/nob.h 变化并自动重建自身。
  *
  * 用法:
- *   cc nob.c -o nob     # 首次引导（或 make）
- *   ./nob               # 默认：构建 bili 与 bili-static
- *   ./nob static        # 只构建静态版 bili-static
+ *   cc nob.c -o nob     # 首次引导（或 make；Windows: gcc nob.c -o nob.exe）
+ *   ./nob               # 默认：构建 bili（Windows 下没有 musl，不构建 bili-static）
+ *   ./nob static        # 只构建静态版 bili-static（仅 Linux）
  *   ./nob clean         # 清理产物
  */
 #define NOB_IMPLEMENTATION
 #include "nob.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 #define MUSL_CC ".musl/install/bin/musl-gcc"
 
-/* 收集全部源文件：src/*.c 自动扫描 + vendor 两个内嵌库 */
+/* PATH 上是否存在可执行文件（编译器探测用） */
+static bool cmd_on_path(const char *name)
+{
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    return SearchPathA(NULL, name, ".exe", (DWORD)sizeof(buf), buf, NULL) > 0;
+#else
+    const char *path = getenv("PATH");
+    if (!path || !*path) {
+        return true;
+    }
+    char full[4096];
+    size_t name_len = strlen(name);
+    const char *start = path;
+    for (const char *p = path;; p++) {
+        if (*p != ':' && *p != '\0') {
+            continue;
+        }
+        size_t n = (size_t)(p - start);
+        if (n == 0) {
+            n = 1; /* 空条目 = 当前目录 */
+            full[0] = '.';
+        } else if (n < sizeof(full)) {
+            memcpy(full, start, n);
+        }
+        if (n + name_len + 2 <= sizeof(full)) {
+            full[n] = '/';
+            memcpy(full + n + 1, name, name_len + 1);
+            if (access(full, X_OK) == 0) {
+                return true;
+            }
+        }
+        if (!*p) {
+            break;
+        }
+        start = p + 1;
+    }
+    return false;
+#endif
+}
+
+/* 依次探测 gcc / clang / cc，返回第一个可用的编译器 */
+static const char *pick_cc(void)
+{
+    static const char *candidates[] = { "gcc", "clang", "cc" };
+    for (size_t i = 0; i < NOB_ARRAY_LEN(candidates); i++) {
+        if (cmd_on_path(candidates[i])) {
+            return candidates[i];
+        }
+    }
+    return "cc";
+}
+
+/* Windows 下输出文件自动带 .exe */
+static const char *with_exe(const char *name)
+{
+#ifdef _WIN32
+    static char buf[256];
+    snprintf(buf, sizeof(buf), "%s.exe", name);
+    return buf;
+#else
+    return name;
+#endif
+}
+
+/* 收集全部源文件：src 目录下所有 .c 自动扫描 + vendor 两个内嵌库 */
 static bool collect_sources(Nob_Cmd *cmd)
 {
     Nob_File_Paths children = { 0 };
@@ -43,6 +112,11 @@ static bool build_one(const char *cc, const char *out, bool link_static)
     Nob_Cmd cmd = { 0 };
     nob_cmd_append(&cmd, cc, "-O2", "-std=c11", "-Wall", "-Wextra",
                    "-D_GNU_SOURCE", "-Isrc", "-Isrc/vendor");
+#ifdef _WIN32
+    /* MinGW 默认走 msvcrt printf，不支持 C99 的 %lld；
+     * 打开内建 stdio 实现后与 POSIX 行为一致 */
+    nob_cmd_append(&cmd, "-D__USE_MINGW_ANSI_STDIO=1");
+#endif
     if (link_static) {
         nob_cmd_append(&cmd, "-static");
     }
@@ -53,6 +127,7 @@ static bool build_one(const char *cc, const char *out, bool link_static)
     if (!nob_cmd_run(&cmd)) {
         return false;
     }
+#ifndef _WIN32
     if (link_static) {
         Nob_Cmd strip = { 0 };
         nob_cmd_append(&strip, "strip", out);
@@ -60,26 +135,33 @@ static bool build_one(const char *cc, const char *out, bool link_static)
             return false;
         }
     }
+#endif
     nob_log(NOB_INFO, "构建完成: %s", out);
     return true;
 }
 
 int main(int argc, char **argv)
 {
+#ifndef _WIN32
     /* 加固：把 argv[0] 固定为真实绝对路径，自重建永远只作用于 nob 自己，
-     * 不受调用方式（相对路径/PATH 查找）影响 */
+     * 不受调用方式（相对路径/PATH 查找）影响。
+     * Windows 下 nob.h 的自重建直接用 GetModuleFileName，无需处理。 */
     char self[4096];
     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
     if (n > 0) {
         self[n] = '\0';
         argv[0] = self;
     }
+#endif
     NOB_GO_REBUILD_URSELF(argc, argv);
 
     const char *what = argc > 1 ? argv[1] : "all";
 
     if (strcmp(what, "clean") == 0) {
-        static const char *artifacts[] = { "bili", "bili-static", "bili-tui.log", "nob.old" };
+        static const char *artifacts[] = {
+            "bili", "bili-static", "bili-tui.log", "nob.old",
+            "bili.exe", "bili-static.exe",
+        };
         for (size_t i = 0; i < sizeof(artifacts) / sizeof(artifacts[0]); i++) {
             if (nob_file_exists(artifacts[i])) {
                 nob_delete_file(artifacts[i]);
@@ -90,6 +172,11 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(what, "static") == 0) {
+#ifdef _WIN32
+        (void)MUSL_CC;
+        nob_log(NOB_ERROR, "bili-static 基于 musl 静态链接，仅支持 Linux，Windows 下不可用");
+        return 1;
+#else
         if (!nob_file_exists(MUSL_CC)) {
             nob_log(NOB_ERROR,
                     "静态构建需要 musl 工具链，未找到 %s。引导方法见 README 构建"
@@ -97,16 +184,25 @@ int main(int argc, char **argv)
             return 1;
         }
         return build_one(MUSL_CC, "bili-static", true) ? 0 : 1;
+#endif
     }
 
     if (strcmp(what, "all") == 0) {
-        bool ok = build_one("cc", "bili", false);
-        if (!nob_file_exists(MUSL_CC)) {
+        const char *cc = pick_cc();
+        bool ok = build_one(cc, with_exe("bili"), false);
+        if (ok) {
+#ifdef _WIN32
             nob_log(NOB_WARNING,
-                    "跳过 bili-static：未找到 musl 工具链 %s（引导方法见 README 构建一节）",
-                    MUSL_CC);
-        } else {
-            ok = build_one(MUSL_CC, "bili-static", true) && ok;
+                    "Windows 下不构建 bili-static（musl 静态链接仅支持 Linux）");
+#else
+            if (!nob_file_exists(MUSL_CC)) {
+                nob_log(NOB_WARNING,
+                        "跳过 bili-static：未找到 musl 工具链 %s（引导方法见 README 构建一节）",
+                        MUSL_CC);
+            } else {
+                ok = build_one(MUSL_CC, "bili-static", true) && ok;
+            }
+#endif
         }
         return ok ? 0 : 1;
     }

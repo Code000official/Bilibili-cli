@@ -5,3 +5,6 @@ bili-tui.log
 *.m4s
 nob
 nob.old
+*.exe
+*.exe.old
+bili-login-debug.log

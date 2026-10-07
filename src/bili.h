@@ -83,4 +83,12 @@ int bili_parse_playurl_json(const char *body, bili_playurl_t *out);
 void bili_view_free(bili_view_t *v);
 void bili_playurl_free(bili_playurl_t *p);
 
+/* ---------- 流选择（main/queue 共用） ---------- */
+
+/* DASH 视频流：取 qn <= want 的最高档；全超则取最低档 */
+const bili_stream_t *bili_pick_video(const bili_playurl_t *pu, int want);
+
+/* DASH 音频流：优先 30280(192k) > 30232(132k) > 30216(64k) */
+const bili_stream_t *bili_pick_audio(const bili_playurl_t *pu);
+
 #endif
